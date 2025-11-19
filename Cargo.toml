@@ -10,3 +10,7 @@ prost = "0.14.1"
 
 [build-dependencies]
 prost-build = "0.14.1"
+
+[package.metadata.llvm-cov]
+# Exclude generated protobuf code from coverage reports
+ignore-filename-regex = "plugin\\.rs"
