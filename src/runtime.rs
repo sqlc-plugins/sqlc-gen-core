@@ -1,26 +1,157 @@
+//! Runtime infrastructure for sqlc plugin execution.
+//!
+//! This module provides the core runtime functions for sqlc plugins, handling
+//! the communication protocol between sqlc and the plugin. It reads protobuf-encoded
+//! requests from stdin, processes them through a user-provided handler, and writes
+//! protobuf-encoded responses to stdout.
+//!
+//! # Overview
+//!
+//! The runtime handles:
+//! - Reading and decoding protobuf messages from stdin
+//! - Invoking user-defined code generation logic
+//! - Encoding and writing responses back to stdout
+//! - Error propagation and handling
+//!
+//! # Example
+//!
+//! ```no_run
+//! use sqlc_gen_core::plugin::{GenerateRequest, GenerateResponse, File};
+//! use sqlc_gen_core::runtime::run;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     run(|request| {
+//!         // Your code generation logic here
+//!         let files = vec![File {
+//!             name: "output.rs".to_string(),
+//!             contents: b"// Generated code".to_vec(),
+//!         }];
+//!         
+//!         Ok(GenerateResponse { files })
+//!     })
+//! }
+//! ```
+
 use crate::plugin::{GenerateRequest, GenerateResponse};
 use prost::Message;
 use std::error::Error;
 use std::io::{Read, Write};
 
-pub fn run<TFunc>(process: TFunc) -> Result<(), Box<dyn Error>>
+/// Runs a sqlc plugin with the standard stdin/stdout communication protocol.
+///
+/// This is the main entry point for sqlc plugins. It reads a protobuf-encoded
+/// [`GenerateRequest`] from stdin, passes it to your processing function, and
+/// writes the resulting [`GenerateResponse`] back to stdout.
+///
+/// # Arguments
+///
+/// * `process` - A function that takes a [`GenerateRequest`] and returns a
+///   [`GenerateResponse`]. This is where your code generation logic should live.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Reading from stdin fails
+/// - Decoding the protobuf request fails
+/// - The process function returns an error
+/// - Encoding the response fails
+/// - Writing to stdout fails
+///
+/// # Example
+///
+/// ```no_run
+/// use sqlc_gen_core::plugin::{GenerateRequest, GenerateResponse, File};
+/// use sqlc_gen_core::runtime::run;
+///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     run(|request| {
+///         // Access request data
+///         let version = &request.sqlc_version;
+///         let queries = &request.queries;
+///         
+///         // Generate files based on the request
+///         let files = vec![File {
+///             name: "generated.rs".to_string(),
+///             contents: b"// Generated code".to_vec(),
+///         }];
+///         
+///         Ok(GenerateResponse { files })
+///     })
+/// }
+/// ```
+pub fn run<F>(process: F) -> Result<(), Box<dyn Error>>
 where
-    TFunc: FnOnce(GenerateRequest) -> Result<GenerateResponse, Box<dyn Error>>,
+    F: FnOnce(GenerateRequest) -> Result<GenerateResponse, Box<dyn Error>>,
 {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     run_with_io(stdin.lock(), stdout.lock(), process)
 }
 
-pub fn run_with_io<TReader, TWriter, TFunc>(
-    mut reader: TReader,
-    mut writer: TWriter,
-    process: TFunc,
-) -> Result<(), Box<dyn Error>>
+/// Runs a sqlc plugin with custom I/O streams.
+///
+/// This is a more flexible version of [`run`] that allows you to provide custom
+/// readers and writers instead of using stdin/stdout. This is particularly useful
+/// for testing, as it allows you to pass in-memory buffers instead of actual I/O streams.
+///
+/// # Arguments
+///
+/// * `reader` - An input stream containing the protobuf-encoded [`GenerateRequest`]
+/// * `writer` - An output stream where the protobuf-encoded [`GenerateResponse`] will be written
+/// * `process` - A function that takes a [`GenerateRequest`] and returns a [`GenerateResponse`]
+///
+/// # Type Parameters
+///
+/// * `R` - Any type that implements [`Read`]
+/// * `W` - Any type that implements [`Write`]
+/// * `F` - A closure that processes the request and returns a response
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Reading from the input stream fails
+/// - Decoding the protobuf request fails
+/// - The process function returns an error
+/// - Encoding the response fails
+/// - Writing to the output stream fails
+///
+/// # Example
+///
+/// ```
+/// use sqlc_gen_core::plugin::{GenerateRequest, GenerateResponse, File};
+/// use sqlc_gen_core::runtime::run_with_io;
+/// use prost::Message;
+///
+/// // Create a test request
+/// let request = GenerateRequest {
+///     sqlc_version: "1.0.0".to_string(),
+///     settings: None,
+///     catalog: None,
+///     queries: vec![],
+///     plugin_options: vec![],
+///     global_options: vec![],
+/// };
+///
+/// // Encode it
+/// let mut input = Vec::new();
+/// request.encode(&mut input).unwrap();
+///
+/// // Process it
+/// let mut output = Vec::new();
+/// run_with_io(&input[..], &mut output, |req| {
+///     assert_eq!(req.sqlc_version, "1.0.0");
+///     Ok(GenerateResponse { files: vec![] })
+/// }).unwrap();
+///
+/// // Decode the response
+/// let response = GenerateResponse::decode(&output[..]).unwrap();
+/// assert_eq!(response.files.len(), 0);
+/// ```
+pub fn run_with_io<R, W, F>(mut reader: R, mut writer: W, process: F) -> Result<(), Box<dyn Error>>
 where
-    TReader: Read,
-    TWriter: Write,
-    TFunc: FnOnce(GenerateRequest) -> Result<GenerateResponse, Box<dyn Error>>,
+    R: Read,
+    W: Write,
+    F: FnOnce(GenerateRequest) -> Result<GenerateResponse, Box<dyn Error>>,
 {
     let mut input = Vec::new();
     reader.read_to_end(&mut input)?;
