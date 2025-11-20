@@ -7,7 +7,7 @@ description = "A crate for building sqlc plugins"
 
 [dependencies]
 prost = "0.14.1"
-sqlparser = "0.50"
+sqlparser = "0.59"
 
 [build-dependencies]
 prost-build = "0.14.1"
