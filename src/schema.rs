@@ -245,7 +245,7 @@ impl SchemaDef {
         &mut self,
         name: Option<ObjectName>,
         table_name: ObjectName,
-        columns: Vec<sqlparser::ast::OrderByExpr>,
+        indices: Vec<sqlparser::ast::IndexColumn>,
         unique: bool,
     ) -> Result<(), String> {
         let table_name_str = object_name_to_string(&table_name);
@@ -253,7 +253,10 @@ impl SchemaDef {
         if let Some(index_name) = name {
             let index = IndexDef {
                 name: object_name_to_string(&index_name),
-                columns: columns.iter().map(|col| format!("{}", col.expr)).collect(),
+                columns: indices
+                    .iter()
+                    .map(|index| format!("{}", index.column))
+                    .collect(),
                 unique,
             };
 
@@ -274,7 +277,8 @@ impl SchemaDef {
         let table_name = object_name_to_string(&name);
 
         for operation in operations {
-            if let sqlparser::ast::AlterTableOperation::AddConstraint(constraint) = operation {
+            if let sqlparser::ast::AlterTableOperation::AddConstraint { constraint, .. } = operation
+            {
                 if let Some(table_schema) = self.tables.get_mut(&table_name) {
                     match constraint {
                         TableConstraint::PrimaryKey { name, columns, .. } => {
