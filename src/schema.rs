@@ -46,7 +46,7 @@ impl SchemaDef {
     }
 
     /// Parse SQL schema from a string
-    pub fn parse(mut self, sql: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn parse(&mut self, sql: &str) -> Result<(), Box<dyn Error>> {
         let dialect = self.dialect.to_dialect();
         let statements = Parser::parse_sql(dialect.as_ref(), sql)?;
 
@@ -78,7 +78,7 @@ impl SchemaDef {
             }
         }
 
-        Ok(self)
+        Ok(())
     }
 
     /// Get table schema by name
@@ -322,15 +322,15 @@ impl SchemaDef {
 impl SchemaDef {
     /// Parse schema files from sqlc Settings
     pub fn parse_from_settings(
-        mut self,
+        &mut self,
         settings: &crate::plugin::Settings,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         for schema_file in &settings.schema {
             // In a real plugin, you'd read the file contents
             // For now, this is a placeholder that plugins would extend
-            self = self.parse(schema_file)?;
+            self.parse(schema_file)?;
         }
-        Ok(self)
+        Ok(())
     }
 
     /// Check if a column is part of the primary key
@@ -470,9 +470,9 @@ mod tests {
     #[test]
     fn test_parse_create_table_with_inline_pk() {
         let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);";
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let table = parser.get_table("users").unwrap();
         assert_eq!(table.name, "users");
@@ -483,9 +483,9 @@ mod tests {
     #[test]
     fn test_parse_create_table_with_table_pk() {
         let sql = "CREATE TABLE users (id INTEGER, name TEXT, PRIMARY KEY (id));";
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let table = parser.get_table("users").unwrap();
         assert_eq!(table.name, "users");
@@ -503,9 +503,9 @@ mod tests {
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
         "#;
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let table = parser.get_table("posts").unwrap();
         assert_eq!(table.foreign_keys.len(), 1);
@@ -520,9 +520,9 @@ mod tests {
             CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);
             CREATE UNIQUE INDEX idx_email ON users(email);
         "#;
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let table = parser.get_table("users").unwrap();
         assert_eq!(table.indexes.len(), 1);
@@ -533,9 +533,9 @@ mod tests {
     #[test]
     fn test_is_primary_key_column() {
         let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);";
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         assert!(parser.is_primary_key_column("users", "id"));
         assert!(!parser.is_primary_key_column("users", "name"));
@@ -551,9 +551,9 @@ mod tests {
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
         "#;
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let fks = parser.get_column_foreign_keys("posts", "user_id");
         assert_eq!(fks.len(), 1);
@@ -570,9 +570,9 @@ mod tests {
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
         "#;
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let refs = parser.get_referencing_foreign_keys("users");
         assert_eq!(refs.len(), 1);
@@ -585,9 +585,9 @@ mod tests {
             CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);
             CREATE UNIQUE INDEX idx_email ON users(email);
         "#;
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         assert!(parser.has_unique_index("users", "email"));
         assert!(!parser.has_unique_index("users", "id"));
@@ -603,9 +603,9 @@ mod tests {
                 created_at TIMESTAMP DEFAULT NOW()
             );
         "#;
-        let parser = SchemaDef::new(SchemaDialect::PostgreSQL)
-            .parse(sql)
-            .unwrap();
+
+        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
+        parser.parse(sql).unwrap();
 
         let table = parser.get_table("users").unwrap();
         assert_eq!(table.columns.len(), 4);
