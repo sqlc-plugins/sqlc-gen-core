@@ -30,23 +30,20 @@ impl SchemaDialect {
     }
 }
 
-/// Schema definition parser for extracting constraint information
-pub struct SchemaDef {
+/// SQL schema builder for extracting constraint information from SQL DDL
+pub struct SchemaBuilder {
     dialect: SchemaDialect,
-    tables: HashMap<String, TableDef>,
 }
 
-impl SchemaDef {
-    /// Create a new schema parser with the specified dialect
+impl SchemaBuilder {
+    /// Create a new schema builder with the specified dialect
     pub fn new(dialect: SchemaDialect) -> Self {
-        Self {
-            dialect,
-            tables: HashMap::new(),
-        }
+        Self { dialect }
     }
 
-    /// Parse SQL schema from a string
-    pub fn parse(&mut self, sql: &str) -> Result<(), Box<dyn Error>> {
+    /// Parse SQL schema from a string and return a Schema
+    pub fn parse_sql(&self, sql: &str) -> Result<SchemaDef, Box<dyn Error>> {
+        let mut schema = SchemaDef::new();
         let dialect = self.dialect.to_dialect();
         let statements = Parser::parse_sql(dialect.as_ref(), sql)?;
 
@@ -54,6 +51,7 @@ impl SchemaDef {
             match statement {
                 Statement::CreateTable(create_table) => {
                     self.parse_create_table(
+                        &mut schema,
                         create_table.name,
                         create_table.columns,
                         create_table.constraints,
@@ -61,6 +59,7 @@ impl SchemaDef {
                 }
                 Statement::CreateIndex(create_index) => {
                     self.parse_create_index(
+                        &mut schema,
                         create_index.name,
                         create_index.table_name,
                         create_index.columns,
@@ -70,7 +69,7 @@ impl SchemaDef {
                 Statement::AlterTable {
                     name, operations, ..
                 } => {
-                    self.parse_alter_table(name, operations)?;
+                    self.parse_alter_table(&mut schema, name, operations)?;
                 }
                 _ => {
                     // Ignore other statements (CREATE VIEW, INSERT, etc.)
@@ -78,22 +77,31 @@ impl SchemaDef {
             }
         }
 
-        Ok(())
+        Ok(schema)
     }
 
-    /// Get table schema by name
-    pub fn get_table(&self, name: &str) -> Option<&TableDef> {
-        self.tables.get(name)
-    }
-
-    /// Get all table schemas
-    pub fn tables(&self) -> impl Iterator<Item = &TableDef> {
-        self.tables.values()
+    /// Parse schema files from sqlc Settings
+    pub fn parse_from_settings(
+        &self,
+        settings: &crate::plugin::Settings,
+    ) -> Result<SchemaDef, Box<dyn Error>> {
+        let mut schema = SchemaDef::new();
+        for schema_file in &settings.schema {
+            // In a real plugin, you'd read the file contents
+            // For now, this is a placeholder that plugins would extend
+            let file_schema = self.parse_sql(schema_file)?;
+            // Merge tables from file_schema into schema
+            for table in file_schema.tables() {
+                schema.add_table(table.clone());
+            }
+        }
+        Ok(schema)
     }
 
     /// Parse CREATE TABLE statement
     fn parse_create_table(
-        &mut self,
+        &self,
+        schema: &mut SchemaDef,
         name: ObjectName,
         columns: Vec<sqlparser::ast::ColumnDef>,
         constraints: Vec<TableConstraint>,
@@ -236,13 +244,14 @@ impl SchemaDef {
             }
         }
 
-        self.tables.insert(table_name, table_schema);
+        schema.add_table(table_schema);
         Ok(())
     }
 
     /// Parse CREATE INDEX statement
     fn parse_create_index(
-        &mut self,
+        &self,
+        schema: &mut SchemaDef,
         name: Option<ObjectName>,
         table_name: ObjectName,
         indices: Vec<sqlparser::ast::IndexColumn>,
@@ -260,7 +269,7 @@ impl SchemaDef {
                 unique,
             };
 
-            if let Some(table_schema) = self.tables.get_mut(&table_name_str) {
+            if let Some(table_schema) = schema.table_mut(&table_name_str) {
                 table_schema.indexes.push(index);
             }
         }
@@ -270,7 +279,8 @@ impl SchemaDef {
 
     /// Parse ALTER TABLE statement
     fn parse_alter_table(
-        &mut self,
+        &self,
+        schema: &mut SchemaDef,
         name: ObjectName,
         operations: Vec<sqlparser::ast::AlterTableOperation>,
     ) -> Result<(), String> {
@@ -279,7 +289,7 @@ impl SchemaDef {
         for operation in operations {
             if let sqlparser::ast::AlterTableOperation::AddConstraint { constraint, .. } = operation
             {
-                if let Some(table_schema) = self.tables.get_mut(&table_name) {
+                if let Some(table_schema) = schema.table_mut(&table_name) {
                     match constraint {
                         TableConstraint::PrimaryKey { name, columns, .. } => {
                             table_schema.primary_key = Some(PrimaryKeyDef {
@@ -318,86 +328,45 @@ impl SchemaDef {
     }
 }
 
-/// Helper functions to work with sqlc data structures
+/// Schema definition - pure domain object containing table definitions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaDef {
+    tables: HashMap<String, TableDef>,
+}
+
 impl SchemaDef {
-    /// Parse schema files from sqlc Settings
-    pub fn parse_from_settings(
-        &mut self,
-        settings: &crate::plugin::Settings,
-    ) -> Result<(), Box<dyn Error>> {
-        for schema_file in &settings.schema {
-            // In a real plugin, you'd read the file contents
-            // For now, this is a placeholder that plugins would extend
-            self.parse(schema_file)?;
+    /// Create a new empty schema
+    pub fn new() -> Self {
+        Self {
+            tables: HashMap::new(),
         }
-        Ok(())
     }
 
-    /// Check if a column is part of the primary key
-    pub fn is_primary_key_column(&self, table_name: &str, column_name: &str) -> bool {
-        if let Some(table) = self.get_table(table_name) {
-            if let Some(pk) = &table.primary_key {
-                return pk.columns.iter().any(|col| col == column_name);
-            }
-        }
-        false
+    /// Get table definition by name
+    pub fn table(&self, name: &str) -> Option<&TableDef> {
+        self.tables.get(name)
     }
 
-    /// Get foreign keys for a specific column
-    pub fn get_column_foreign_keys(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> Vec<&ForeignKeyDef> {
-        if let Some(table) = self.get_table(table_name) {
-            return table
-                .foreign_keys
-                .iter()
-                .filter(|fk| fk.columns.iter().any(|col| col == column_name))
-                .collect();
-        }
-        Vec::new()
+    /// Get all table definitions
+    pub fn tables(&self) -> impl Iterator<Item = &TableDef> {
+        self.tables.values()
     }
 
-    /// Get all foreign keys referencing a specific table
-    pub fn get_referencing_foreign_keys(
-        &self,
-        referenced_table: &str,
-    ) -> Vec<(&str, &ForeignKeyDef)> {
-        let mut result = Vec::new();
-        for (table_name, table_schema) in &self.tables {
-            for fk in &table_schema.foreign_keys {
-                if fk.referenced_table == referenced_table {
-                    result.push((table_name.as_str(), fk));
-                }
-            }
-        }
-        result
+    /// Add a table to the schema (used by parser)
+    pub(crate) fn add_table(&mut self, table: TableDef) {
+        self.tables.insert(table.name.clone(), table);
     }
 
-    /// Check if a column has a unique index
-    pub fn has_unique_index(&self, table_name: &str, column_name: &str) -> bool {
-        if let Some(table) = self.get_table(table_name) {
-            return table
-                .indexes
-                .iter()
-                .any(|idx| idx.unique && idx.columns.len() == 1 && idx.columns[0] == column_name);
-        }
-        false
+    /// Get mutable reference to a table (used by parser)
+    pub(crate) fn table_mut(&mut self, name: &str) -> Option<&mut TableDef> {
+        self.tables.get_mut(name)
     }
 }
 
-/// Column definition
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColumnDef {
-    /// Column name
-    pub name: String,
-    /// Data type
-    pub data_type: String,
-    /// Whether the column is nullable
-    pub nullable: bool,
-    /// Default value if specified
-    pub default: Option<String>,
+impl Default for SchemaDef {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Table definition including constraints
@@ -417,6 +386,19 @@ pub struct TableDef {
     pub indexes: Vec<IndexDef>,
 }
 
+/// Column definition
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDef {
+    /// Column name
+    pub name: String,
+    /// Data type
+    pub data_type: String,
+    /// Whether the column is nullable
+    pub nullable: bool,
+    /// Default value if specified
+    pub default: Option<String>,
+}
+
 /// Index information
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexDef {
@@ -428,30 +410,61 @@ pub struct IndexDef {
     pub unique: bool,
 }
 
+impl IndexDef {
+    /// Check if this index contains the specified column
+    pub fn contains(&self, column_name: &str) -> bool {
+        self.columns.iter().any(|col| col == column_name)
+    }
+
+    /// Check if this is a single-column unique index on the specified column
+    pub fn is_unique_on(&self, column_name: &str) -> bool {
+        self.unique && self.columns.len() == 1 && self.columns[0] == column_name
+    }
+}
+
 /// Primary key constraint information
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimaryKeyDef {
-    /// Column names that make up the primary key
-    pub columns: Vec<String>,
     /// Optional constraint name
     pub name: Option<String>,
+    /// Column names that make up the primary key
+    pub columns: Vec<String>,
+}
+
+impl PrimaryKeyDef {
+    /// Check if a column is part of this primary key
+    pub fn contains(&self, column_name: &str) -> bool {
+        self.columns.iter().any(|col| col == column_name)
+    }
 }
 
 /// Foreign key constraint information
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKeyDef {
+    /// Optional constraint name
+    pub name: Option<String>,
     /// Column names in the source table
     pub columns: Vec<String>,
     /// Referenced table name
     pub referenced_table: String,
     /// Referenced column names
     pub referenced_columns: Vec<String>,
-    /// Optional constraint name
-    pub name: Option<String>,
     /// ON DELETE action
     pub on_delete: Option<String>,
     /// ON UPDATE action
     pub on_update: Option<String>,
+}
+
+impl ForeignKeyDef {
+    /// Check if this foreign key references the specified table
+    pub fn references(&self, table_name: &str) -> bool {
+        self.referenced_table == table_name
+    }
+
+    /// Check if this foreign key contains the specified column
+    pub fn contains(&self, column_name: &str) -> bool {
+        self.columns.iter().any(|col| col == column_name)
+    }
 }
 
 /// Convert ObjectName to a simple string
@@ -471,10 +484,10 @@ mod tests {
     fn test_parse_create_table_with_inline_pk() {
         let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);";
 
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
 
-        let table = parser.get_table("users").unwrap();
+        let table = schema.table("users").unwrap();
         assert_eq!(table.name, "users");
         assert!(table.primary_key.is_some());
         assert_eq!(table.primary_key.as_ref().unwrap().columns, vec!["id"]);
@@ -484,10 +497,10 @@ mod tests {
     fn test_parse_create_table_with_table_pk() {
         let sql = "CREATE TABLE users (id INTEGER, name TEXT, PRIMARY KEY (id));";
 
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
 
-        let table = parser.get_table("users").unwrap();
+        let table = schema.table("users").unwrap();
         assert_eq!(table.name, "users");
         assert!(table.primary_key.is_some());
         assert_eq!(table.primary_key.as_ref().unwrap().columns, vec!["id"]);
@@ -504,10 +517,10 @@ mod tests {
             );
         "#;
 
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
 
-        let table = parser.get_table("posts").unwrap();
+        let table = schema.table("posts").unwrap();
         assert_eq!(table.foreign_keys.len(), 1);
         assert_eq!(table.foreign_keys[0].columns, vec!["user_id"]);
         assert_eq!(table.foreign_keys[0].referenced_table, "users");
@@ -521,76 +534,13 @@ mod tests {
             CREATE UNIQUE INDEX idx_email ON users(email);
         "#;
 
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
 
-        let table = parser.get_table("users").unwrap();
+        let table = schema.table("users").unwrap();
         assert_eq!(table.indexes.len(), 1);
         assert_eq!(table.indexes[0].name, "idx_email");
         assert!(table.indexes[0].unique);
-    }
-
-    #[test]
-    fn test_is_primary_key_column() {
-        let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);";
-
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
-
-        assert!(parser.is_primary_key_column("users", "id"));
-        assert!(!parser.is_primary_key_column("users", "name"));
-    }
-
-    #[test]
-    fn test_get_column_foreign_keys() {
-        let sql = r#"
-            CREATE TABLE users (id INTEGER PRIMARY KEY);
-            CREATE TABLE posts (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            );
-        "#;
-
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
-
-        let fks = parser.get_column_foreign_keys("posts", "user_id");
-        assert_eq!(fks.len(), 1);
-        assert_eq!(fks[0].referenced_table, "users");
-    }
-
-    #[test]
-    fn test_get_referencing_foreign_keys() {
-        let sql = r#"
-            CREATE TABLE users (id INTEGER PRIMARY KEY);
-            CREATE TABLE posts (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            );
-        "#;
-
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
-
-        let refs = parser.get_referencing_foreign_keys("users");
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].0, "posts");
-    }
-
-    #[test]
-    fn test_has_unique_index() {
-        let sql = r#"
-            CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);
-            CREATE UNIQUE INDEX idx_email ON users(email);
-        "#;
-
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
-
-        assert!(parser.has_unique_index("users", "email"));
-        assert!(!parser.has_unique_index("users", "id"));
     }
 
     #[test]
@@ -604,10 +554,10 @@ mod tests {
             );
         "#;
 
-        let mut parser = SchemaDef::new(SchemaDialect::PostgreSQL);
-        parser.parse(sql).unwrap();
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
 
-        let table = parser.get_table("users").unwrap();
+        let table = schema.table("users").unwrap();
         assert_eq!(table.columns.len(), 4);
 
         // Check id column
@@ -630,5 +580,122 @@ mod tests {
         assert_eq!(table.columns[3].data_type, "TIMESTAMP");
         assert!(table.columns[3].nullable);
         assert!(table.columns[3].default.is_some());
+    }
+
+    #[test]
+    fn test_primary_key_contains() {
+        let sql = r#"
+            CREATE TABLE users (
+                id INTEGER,
+                org_id INTEGER,
+                PRIMARY KEY (id, org_id)
+            );
+        "#;
+
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
+
+        let table = schema.table("users").unwrap();
+        let pk = table.primary_key.as_ref().unwrap();
+
+        assert!(pk.contains("id"));
+        assert!(pk.contains("org_id"));
+        assert!(!pk.contains("name"));
+        assert!(!pk.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_index_contains() {
+        let sql = r#"
+            CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT);
+            CREATE INDEX idx_email_name ON users(email, name);
+        "#;
+
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
+
+        let table = schema.table("users").unwrap();
+        let index = &table.indexes[0];
+
+        assert!(index.contains("email"));
+        assert!(index.contains("name"));
+        assert!(!index.contains("id"));
+        assert!(!index.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_index_is_unique_on() {
+        let sql = r#"
+            CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT);
+            CREATE UNIQUE INDEX idx_email ON users(email);
+            CREATE INDEX idx_name ON users(name);
+            CREATE UNIQUE INDEX idx_email_name ON users(email, name);
+        "#;
+
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
+
+        let table = schema.table("users").unwrap();
+
+        // idx_email is unique on single column "email"
+        assert!(table.indexes[0].is_unique_on("email"));
+        assert!(!table.indexes[0].is_unique_on("name"));
+
+        // idx_name is not unique
+        assert!(!table.indexes[1].is_unique_on("name"));
+
+        // idx_email_name is unique but on multiple columns
+        assert!(!table.indexes[2].is_unique_on("email"));
+        assert!(!table.indexes[2].is_unique_on("name"));
+    }
+
+    #[test]
+    fn test_foreign_key_references() {
+        let sql = r#"
+            CREATE TABLE users (id INTEGER PRIMARY KEY);
+            CREATE TABLE organizations (id INTEGER PRIMARY KEY);
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                org_id INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (org_id) REFERENCES organizations(id)
+            );
+        "#;
+
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
+
+        let table = schema.table("posts").unwrap();
+
+        assert!(table.foreign_keys[0].references("users"));
+        assert!(!table.foreign_keys[0].references("organizations"));
+
+        assert!(table.foreign_keys[1].references("organizations"));
+        assert!(!table.foreign_keys[1].references("users"));
+    }
+
+    #[test]
+    fn test_foreign_key_contains() {
+        let sql = r#"
+            CREATE TABLE users (id INTEGER PRIMARY KEY, org_id INTEGER PRIMARY KEY);
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                user_org_id INTEGER,
+                FOREIGN KEY (user_id, user_org_id) REFERENCES users(id, org_id)
+            );
+        "#;
+
+        let builder = SchemaBuilder::new(SchemaDialect::PostgreSQL);
+        let schema = builder.parse_sql(sql).unwrap();
+
+        let table = schema.table("posts").unwrap();
+        let fk = &table.foreign_keys[0];
+
+        assert!(fk.contains("user_id"));
+        assert!(fk.contains("user_org_id"));
+        assert!(!fk.contains("id"));
+        assert!(!fk.contains("nonexistent"));
     }
 }
