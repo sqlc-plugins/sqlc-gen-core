@@ -87,8 +87,8 @@ impl SchemaDef {
     }
 
     /// Get all table schemas
-    pub fn tables(&self) -> &HashMap<String, TableDef> {
-        &self.tables
+    pub fn tables(&self) -> impl Iterator<Item = &TableDef> {
+        self.tables.values()
     }
 
     /// Parse CREATE TABLE statement
