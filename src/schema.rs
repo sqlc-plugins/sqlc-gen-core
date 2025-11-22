@@ -139,7 +139,7 @@ impl SchemaDef {
             // Extract default value if present
             let default = column.options.iter().find_map(|opt| {
                 if let sqlparser::ast::ColumnOption::Default(expr) = &opt.option {
-                    Some(format!("{}", expr))
+                    Some(expr.to_string())
                 } else {
                     None
                 }
@@ -181,8 +181,8 @@ impl SchemaDef {
                                 .map(|c| c.to_string())
                                 .collect(),
                             name: option.name.as_ref().map(|n| n.to_string()),
-                            on_delete: on_delete.as_ref().map(|a| format!("{:?}", a)),
-                            on_update: on_update.as_ref().map(|a| format!("{:?}", a)),
+                            on_delete: on_delete.as_ref().map(|a| a.to_string()),
+                            on_update: on_update.as_ref().map(|a| a.to_string()),
                         });
                     }
                     _ => {}
@@ -216,8 +216,8 @@ impl SchemaDef {
                             .map(|c| c.to_string())
                             .collect(),
                         name: name.map(|n| n.to_string()),
-                        on_delete: on_delete.as_ref().map(|a| format!("{:?}", a)),
-                        on_update: on_update.as_ref().map(|a| format!("{:?}", a)),
+                        on_delete: on_delete.as_ref().map(|a| a.to_string()),
+                        on_update: on_update.as_ref().map(|a| a.to_string()),
                     });
                 }
                 TableConstraint::Unique {
@@ -304,8 +304,8 @@ impl SchemaDef {
                                     .map(|c| c.to_string())
                                     .collect(),
                                 name: name.map(|n| n.to_string()),
-                                on_delete: on_delete.as_ref().map(|a| format!("{:?}", a)),
-                                on_update: on_update.as_ref().map(|a| format!("{:?}", a)),
+                                on_delete: on_delete.as_ref().map(|a| a.to_string()),
+                                on_update: on_update.as_ref().map(|a| a.to_string()),
                             });
                         }
                         _ => {}
