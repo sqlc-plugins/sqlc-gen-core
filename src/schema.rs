@@ -3,134 +3,56 @@
 //! This module provides functionality to parse SQL schema files and extract
 //! constraint information (primary keys, foreign keys, indexes)
 
+use crate::plugin::{Column, ForeignKey, Identifier, Index, PrimaryKey, Schema, Table};
 use sqlparser::ast::{
     ColumnOption, CreateIndex, CreateTable, ObjectName, Statement, TableConstraint,
 };
-use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::dialect_from_str;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt;
-use std::str::FromStr;
 
-/// SQL dialect type for parsing database-specific syntax
+/// Builder for creating a `plugin::Catalog` from SQL schema definitions.
 ///
-/// Different databases support different SQL syntax, keywords, and data types.
-/// This enum specifies which dialect to use when parsing SQL statements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DatabaseDialect {
-    /// MySQL/MariaDB dialect
-    ///
-    /// Supports MySQL-specific syntax including backtick identifiers,
-    /// MySQL data types, and MySQL-specific keywords.
-    MySQL,
-
-    /// SQLite dialect
-    ///
-    /// Supports SQLite-specific syntax and its limited type system.
-    SQLite,
-
-    /// PostgreSQL dialect
-    ///
-    /// Supports PostgreSQL-specific syntax including dollar-quoted strings,
-    /// arrays, and PostgreSQL-specific data types.
-    PostgreSQL,
-
-    /// Generic SQL dialect (default)
-    ///
-    /// A generic SQL parser that supports standard SQL syntax.
-    /// Use this when working with multiple databases or when the specific
-    /// dialect doesn't matter for your use case.
-    #[default]
-    Generic,
-}
-
-impl DatabaseDialect {
-    /// Convert to sqlparser dialect
-    pub fn to_dialect(&self) -> Box<dyn Dialect> {
-        match self {
-            DatabaseDialect::MySQL => Box::new(MySqlDialect {}),
-            DatabaseDialect::SQLite => Box::new(SQLiteDialect {}),
-            DatabaseDialect::Generic => Box::new(GenericDialect {}),
-            DatabaseDialect::PostgreSQL => Box::new(PostgreSqlDialect {}),
-        }
-    }
-}
-
-impl FromStr for DatabaseDialect {
-    type Err = ParseDialectError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "mysql" | "mariadb" => Ok(DatabaseDialect::MySQL),
-            "sqlite" | "sqlite3" => Ok(DatabaseDialect::SQLite),
-            "postgres" | "postgresql" | "psql" => Ok(DatabaseDialect::PostgreSQL),
-            "generic" => Ok(DatabaseDialect::Generic),
-            _ => Err(ParseDialectError::UnknownDialect(s.to_string())),
-        }
-    }
-}
-
-impl fmt::Display for DatabaseDialect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DatabaseDialect::MySQL => write!(f, "mysql"),
-            DatabaseDialect::SQLite => write!(f, "sqlite"),
-            DatabaseDialect::PostgreSQL => write!(f, "postgresql"),
-            DatabaseDialect::Generic => write!(f, "generic"),
-        }
-    }
-}
-
-/// Error type for parsing database dialect from string
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParseDialectError {
-    /// Unknown dialect name was provided
-    UnknownDialect(String),
-}
-
-impl fmt::Display for ParseDialectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseDialectError::UnknownDialect(s) => {
-                write!(
-                    f,
-                    "unknown database dialect: '{}'. Valid options: mysql, sqlite, postgresql, generic",
-                    s
-                )
-            }
-        }
-    }
-}
-
-impl Error for ParseDialectError {}
-
-/// Database type containing parsed SQL schema information
-///
-/// A `Database` represents a collection of schemas parsed from SQL DDL statements.
-/// Each database uses a specific SQL dialect (MySQL, PostgreSQL, SQLite, or Generic)
-/// to correctly parse dialect-specific syntax.
+/// A `CatalogBuilder` parses SQL DDL statements using a specific SQL dialect
+/// (MySQL, PostgreSQL, SQLite, or Generic) and accumulates schema information.
+/// Once parsing is complete, the `build` method can be called to produce a
+/// `plugin::Catalog` instance.
 ///
 /// # Examples
 ///
 /// ```
-/// use sqlc_gen_core::schema::{Database, DatabaseDialect};
+/// use sqlc_gen_core::schema::CatalogBuilder;
 ///
-/// let mut db = Database::new(DatabaseDialect::PostgreSQL);
-/// db.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)").unwrap();
+/// let mut builder = CatalogBuilder::new("postgresql");
+/// builder.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)").unwrap();
 ///
-/// // Access schemas directly via the public HashMap
-/// for (schema_name, schema) in &db.schemas {
-///     println!("Schema: {}", schema_name);
+/// let catalog = builder.build();
+///
+/// // Access schemas from the built catalog
+/// for schema in &catalog.schemas {
+///     println!("Schema: {}", schema.name);
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Database {
+/// use sqlc_gen_core::schema::CatalogBuilder;
+///
+/// let mut builder = CatalogBuilder::new("postgresql");
+/// builder.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)").unwrap();
+///
+/// let catalog = builder.build();
+///
+/// // Access schemas from the built catalog
+/// for schema in &catalog.schemas {
+///     println!("Schema: {}", schema.name);
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogBuilder {
     /// SQL dialect used for parsing statements
     ///
     /// Determines how SQL syntax is interpreted during parsing.
     /// Different dialects support different keywords, data types, and syntax features.
-    pub dialect: DatabaseDialect,
+    pub dialect: String,
 
     /// Map of schema names to schema definitions
     ///
@@ -140,42 +62,131 @@ pub struct Database {
     pub schemas: HashMap<String, Schema>,
 }
 
-impl Database {
-    /// Create a new empty database with the specified SQL dialect
-    pub fn new(dialect: DatabaseDialect) -> Self {
+impl Default for CatalogBuilder {
+    fn default() -> Self {
         Self {
-            dialect,
+            dialect: "generic".to_string(),
             schemas: HashMap::new(),
+        }
+    }
+}
+
+impl CatalogBuilder {
+    /// Create a new empty builder with the specified SQL dialect
+    pub fn new(dialect: &str) -> Self {
+        Self {
+            dialect: dialect.to_string(),
+            schemas: HashMap::new(),
+        }
+    }
+
+    /// Build the `plugin::Catalog` from the parsed schema information.
+    pub fn build(self) -> crate::plugin::Catalog {
+        crate::plugin::Catalog {
+            name: "".to_string(),
+            default_schema: "".to_string(),
+            comment: "".to_string(),
+            schemas: self.schemas.into_values().collect(),
+        }
+    }
+
+    /// Merges the schemas and tables from another catalog into this builder.
+    ///
+    /// If a schema from the `other` catalog already exists in the builder, its
+    /// contents (tables, enums, etc.) will be merged into the existing schema.
+    /// If an item (table, enum, etc.) with the same name already exists within
+    /// a schema, it will be ignored to prevent duplicates.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - A `plugin::Catalog` to merge into the builder.
+    pub fn merge_catalog(&mut self, other: crate::plugin::Catalog) {
+        for other_schema in other.schemas {
+            let builder_schema = self
+                .schemas
+                .entry(other_schema.name.clone())
+                .or_insert_with(|| Schema {
+                    name: other_schema.name.clone(),
+                    ..Default::default()
+                });
+
+            let existing_tables: std::collections::HashSet<String> = builder_schema
+                .tables
+                .iter()
+                .filter_map(|t| t.rel.as_ref().map(|r| r.name.clone()))
+                .collect();
+            for table in other_schema.tables {
+                if let Some(rel) = &table.rel {
+                    if !existing_tables.contains(&rel.name) {
+                        builder_schema.tables.push(table);
+                    }
+                }
+            }
+
+            let existing_enums: std::collections::HashSet<String> = builder_schema
+                .enums
+                .iter()
+                .map(|e| e.name.clone())
+                .collect();
+            for r#enum in other_schema.enums {
+                if !existing_enums.contains(&r#enum.name) {
+                    builder_schema.enums.push(r#enum);
+                }
+            }
+
+            let existing_composites: std::collections::HashSet<String> = builder_schema
+                .composite_types
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            for composite in other_schema.composite_types {
+                if !existing_composites.contains(&composite.name) {
+                    builder_schema.composite_types.push(composite);
+                }
+            }
         }
     }
 
     /// Parse SQL schema from a string and return a Schema
     pub fn parse_sql(&mut self, sql: &str) -> Result<(), Box<dyn Error>> {
-        let dialect = self.dialect.to_dialect();
+        let dialect =
+            dialect_from_str(&self.dialect).ok_or(format!("Unknown dialect: {}", self.dialect))?;
         let statements = Parser::parse_sql(dialect.as_ref(), sql)?;
 
         for statement in statements {
             match statement {
                 Statement::CreateTable(table) => {
                     let table_def = Table::from_create_table(&table);
-                    let schema_name = table_def.schema.clone().unwrap_or_default();
+                    let schema_name = table_def
+                        .rel
+                        .as_ref()
+                        .map(|r| r.schema.clone())
+                        .unwrap_or_default();
 
                     let schema =
                         self.schemas
-                            .entry(schema_name)
-                            .or_insert_with_key(|name| Schema {
-                                name: name.clone(),
-                                tables: HashMap::new(),
+                            .entry(schema_name.clone())
+                            .or_insert_with(|| Schema {
+                                name: schema_name.clone(),
+                                comment: String::new(),
+                                tables: Vec::new(),
+                                enums: Vec::new(),
+                                composite_types: Vec::new(),
                             });
 
-                    let table_name = table_def.name.clone();
-                    schema.tables.insert(table_name, table_def);
+                    schema.tables.push(table_def);
                 }
                 Statement::CreateIndex(index) => {
                     let (schema_name, table_name) = parse_qualified_name(&index.table_name);
 
                     if let Some(schema) = self.schemas.get_mut(&schema_name) {
-                        if let Some(table) = schema.tables.get_mut(&table_name) {
+                        if let Some(table) = schema.tables.iter_mut().find(|t| {
+                            if let Some(rel) = &t.rel {
+                                rel.name == table_name
+                            } else {
+                                false
+                            }
+                        }) {
                             let index_def = Index::from_create_index(&index);
                             table.indexes.push(index_def);
                         }
@@ -187,7 +198,13 @@ impl Database {
                     let (schema_name, table_name) = parse_qualified_name(&name);
 
                     if let Some(schema) = self.schemas.get_mut(&schema_name) {
-                        if let Some(table) = schema.tables.get_mut(&table_name) {
+                        if let Some(table) = schema.tables.iter_mut().find(|t| {
+                            if let Some(rel) = &t.rel {
+                                rel.name == table_name
+                            } else {
+                                false
+                            }
+                        }) {
                             for operation in operations {
                                 if let sqlparser::ast::AlterTableOperation::AddConstraint {
                                     constraint,
@@ -210,73 +227,39 @@ impl Database {
     }
 }
 
-/// Schema definition containing a collection of table definitions
-///
-/// A `Schema` represents a database schema (namespace) that groups related tables together.
-/// In databases that don't support schemas, the default schema has an empty string as its name.
-///
-/// # Examples
-///
-/// ```
-/// use sqlc_gen_core::schema::{Database, DatabaseDialect};
-///
-/// let mut db = Database::new(DatabaseDialect::PostgreSQL);
-/// db.parse_sql("CREATE SCHEMA public; CREATE TABLE public.users (id INTEGER)").unwrap();
-///
-/// if let Some(schema) = db.schemas.get("public") {
-///     println!("Schema: {}", schema.name);
-///     for (table_name, table) in &schema.tables {
-///         println!("  Table: {}", table_name);
-///     }
-/// }
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Schema {
-    /// Schema name
-    ///
-    /// The name of the schema. For databases without schema support or for the default schema,
-    /// this will be an empty string. This field is always consistent with the key used in
-    /// the `Database.schemas` HashMap.
-    pub name: String,
-
-    /// Map of table names to table definitions
-    ///
-    /// The key is the unqualified table name, and the value contains the full table definition
-    /// including columns, constraints, and indexes. Access this directly to iterate over all
-    /// tables or look up specific ones.
-    pub tables: HashMap<String, Table>,
-}
-
-/// Table definition including constraints
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Table {
-    /// Table name
-    pub name: String,
-    /// Schema name (if specified)
-    pub schema: Option<String>,
-    /// Column definitions
-    pub columns: Vec<Column>,
-    /// Primary key constraint
-    pub primary_key: Option<PrimaryKey>,
-    /// Foreign key constraints
-    pub foreign_keys: Vec<ForeignKey>,
-    /// Indexes
-    pub indexes: Vec<Index>,
-}
-
 impl Table {
+    #[cfg(test)]
+    fn new_for_test(name: &str, schema: Option<&str>) -> Self {
+        Self {
+            rel: Some(Identifier {
+                catalog: String::new(),
+                schema: schema.unwrap_or("").to_string(),
+                name: name.to_string(),
+            }),
+            comment: String::new(),
+            columns: vec![],
+            primary_key: None,
+            foreign_keys: vec![],
+            indexes: vec![],
+        }
+    }
+
     /// Create a Table from a CREATE TABLE statement
     pub(crate) fn from_create_table(create_table: &CreateTable) -> Self {
         let name = create_table.name.0.last().unwrap().to_string();
-        let schema = if create_table.name.0.len() > 1 {
-            Some(create_table.name.0[0].to_string())
+        let schema_name = if create_table.name.0.len() > 1 {
+            create_table.name.0[0].to_string()
         } else {
-            None
+            String::new()
         };
 
         let mut table = Self {
-            name,
-            schema,
+            rel: Some(Identifier {
+                catalog: String::new(),
+                schema: schema_name,
+                name,
+            }),
+            comment: String::new(),
             columns: create_table
                 .columns
                 .iter()
@@ -333,25 +316,15 @@ impl Table {
     ///
     /// Returns the table name in the format "schema.table" if a schema is specified,
     /// otherwise returns just the table name.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use sqlc_gen_core::schema::Table;
-    /// # let table = Table {
-    /// #     name: "users".to_string(),
-    /// #     schema: Some("public".to_string()),
-    /// #     columns: vec![],
-    /// #     primary_key: None,
-    /// #     foreign_keys: vec![],
-    /// #     indexes: vec![],
-    /// # };
-    /// assert_eq!(table.qualified_name(), "public.users");
-    /// ```
     pub fn qualified_name(&self) -> String {
-        match &self.schema {
-            Some(schema) if !schema.is_empty() => format!("{}.{}", schema, self.name),
-            _ => self.name.clone(),
+        if let Some(rel) = &self.rel {
+            if !rel.schema.is_empty() {
+                format!("{}.{}", rel.schema, rel.name)
+            } else {
+                rel.name.clone()
+            }
+        } else {
+            String::new()
         }
     }
 
@@ -363,33 +336,9 @@ impl Table {
     }
 }
 
-/// Column definition
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Column {
-    /// Column name as it appears in the database
-    pub name: String,
-
-    /// SQL data type as a string (e.g., "INTEGER", "VARCHAR(255)", "TIMESTAMP")
-    ///
-    /// The exact format depends on the SQL dialect used during parsing.
-    pub data_type: String,
-
-    /// Whether the column allows NULL values
-    ///
-    /// This is `false` if the column has a NOT NULL constraint or is part of a PRIMARY KEY.
-    pub nullable: bool,
-
-    /// Default value expression if specified in the schema
-    ///
-    /// Contains the SQL expression as a string (e.g., "0", "'default'", "NOW()").
-    pub default: Option<String>,
-}
-
 impl Column {
     /// Create column from its definition
     pub(crate) fn from_column_def(column: &sqlparser::ast::ColumnDef) -> Self {
-        let data_type = column.data_type.to_string();
-
         // Check if column is nullable (NOT NULL or PRIMARY KEY constraint)
         let has_not_null = column
             .options
@@ -406,35 +355,31 @@ impl Column {
             )
         });
 
-        let nullable = !has_not_null && !is_primary_key;
-
-        // Extract default value if present
-        let default = column.options.iter().find_map(|opt| {
-            if let ColumnOption::Default(expr) = &opt.option {
-                Some(expr.to_string())
-            } else {
-                None
-            }
-        });
+        let not_null = has_not_null || is_primary_key;
 
         Self {
             name: column.name.to_string(),
-            data_type,
-            nullable,
-            default,
+            not_null,
+            is_array: false,
+            comment: String::new(),
+            length: 0,
+            is_named_param: false,
+            is_func_call: false,
+            scope: String::new(),
+            table: None,
+            table_alias: String::new(),
+            r#type: Some(Identifier {
+                catalog: String::new(),
+                schema: String::new(),
+                name: column.data_type.to_string(),
+            }),
+            is_sqlc_slice: false,
+            embed_table: None,
+            original_name: column.name.to_string(),
+            unsigned: false,
+            array_dims: 0,
         }
     }
-}
-
-/// Index information
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Index {
-    /// Index name
-    pub name: String,
-    /// Column names in the index
-    pub columns: Vec<String>,
-    /// Whether this is a unique index
-    pub unique: bool,
 }
 
 impl Index {
@@ -485,22 +430,13 @@ impl Index {
     }
 }
 
-/// Primary key constraint information
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrimaryKey {
-    /// Optional constraint name
-    pub name: Option<String>,
-    /// Column names that make up the primary key
-    pub columns: Vec<String>,
-}
-
 impl PrimaryKey {
     /// Create a PrimaryKey from a TableConstraint::PrimaryKey
     pub(crate) fn from_table_constraint(constraint: TableConstraint) -> Self {
         match constraint {
             TableConstraint::PrimaryKey { name, columns, .. } => Self {
                 columns: columns.iter().map(|c| c.to_string()).collect(),
-                name: name.map(|n| n.to_string()),
+                name: name.map(|n| n.to_string()).unwrap_or_default(),
             },
             _ => panic!("Expected TableConstraint::PrimaryKey, got {constraint:?}"),
         }
@@ -516,7 +452,11 @@ impl PrimaryKey {
                 is_primary: true, ..
             } => Some(Self {
                 columns: vec![column_name],
-                name: option.name.as_ref().map(|n| n.to_string()),
+                name: option
+                    .name
+                    .as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
             }),
             _ => None,
         }
@@ -526,23 +466,6 @@ impl PrimaryKey {
     pub fn contains(&self, column_name: &str) -> bool {
         self.columns.iter().any(|col| col == column_name)
     }
-}
-
-/// Foreign key constraint information
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForeignKey {
-    /// Optional constraint name
-    pub name: Option<String>,
-    /// Column names in the source table
-    pub columns: Vec<String>,
-    /// Referenced table name
-    pub referenced_table: String,
-    /// Referenced column names
-    pub referenced_columns: Vec<String>,
-    /// ON DELETE action
-    pub on_delete: Option<String>,
-    /// ON UPDATE action
-    pub on_update: Option<String>,
 }
 
 impl ForeignKey {
@@ -561,9 +484,15 @@ impl ForeignKey {
                 columns: columns.iter().map(|c| c.to_string()).collect(),
                 referenced_table: foreign_table.to_string(),
                 referenced_columns: referred_columns.iter().map(|c| c.to_string()).collect(),
-                name: name.map(|n| n.to_string()),
-                on_delete: on_delete.as_ref().map(|a| a.to_string()),
-                on_update: on_update.as_ref().map(|a| a.to_string()),
+                name: name.map(|n| n.to_string()).unwrap_or_default(),
+                on_delete: on_delete
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                on_update: on_update
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
             },
             _ => panic!("Expected TableConstraint::ForeignKey, got {constraint:?}"),
         }
@@ -585,9 +514,19 @@ impl ForeignKey {
                 columns: vec![column_name],
                 referenced_table: foreign_table.to_string(),
                 referenced_columns: referred_columns.iter().map(|c| c.to_string()).collect(),
-                name: option.name.as_ref().map(|n| n.to_string()),
-                on_delete: on_delete.as_ref().map(|a| a.to_string()),
-                on_update: on_update.as_ref().map(|a| a.to_string()),
+                name: option
+                    .name
+                    .as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                on_delete: on_delete
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
+                on_update: on_update
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
             }),
             _ => None,
         }
@@ -621,299 +560,212 @@ mod tests {
     use super::*;
 
     // ============================================================================
-    // DatabaseDialect Tests
+    // CatalogBuilder Tests
     // ============================================================================
 
     #[test]
-    fn test_database_dialect_default() {
-        let dialect = DatabaseDialect::default();
-        assert_eq!(dialect, DatabaseDialect::Generic);
+    fn test_builder_new() {
+        let builder = CatalogBuilder::new("postgresql");
+        assert_eq!(builder.dialect, "postgresql");
+        assert!(builder.schemas.is_empty());
     }
 
     #[test]
-    fn test_database_dialect_to_dialect_mysql() {
-        let dialect = DatabaseDialect::MySQL;
-        let boxed = dialect.to_dialect();
-        // Test that it can parse MySQL-specific syntax (backticks)
-        let result = Parser::parse_sql(boxed.as_ref(), "CREATE TABLE `users` (id INT)");
+    fn test_builder_default() {
+        let builder = CatalogBuilder::default();
+        assert_eq!(builder.dialect, "generic");
+        assert!(builder.schemas.is_empty());
+    }
+
+    #[test]
+    fn test_builder_parse_simple_table() {
+        let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY)";
+
+        let mut builder = CatalogBuilder::new("generic");
+        let result = builder.parse_sql(sql);
         assert!(result.is_ok());
-    }
 
-    #[test]
-    fn test_database_dialect_to_dialect_sqlite() {
-        let dialect = DatabaseDialect::SQLite;
-        let boxed = dialect.to_dialect();
-        // Test that dialect is created successfully
-        let result = Parser::parse_sql(boxed.as_ref(), "CREATE TABLE users (id INTEGER)");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_database_dialect_to_dialect_postgresql() {
-        let dialect = DatabaseDialect::PostgreSQL;
-        let boxed = dialect.to_dialect();
-        // Test that dialect is created successfully
-        let result = Parser::parse_sql(boxed.as_ref(), "CREATE TABLE users (id INTEGER)");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_database_dialect_to_dialect_generic() {
-        let dialect = DatabaseDialect::Generic;
-        let boxed = dialect.to_dialect();
-        // Test that dialect is created successfully
-        let result = Parser::parse_sql(boxed.as_ref(), "CREATE TABLE users (id INTEGER)");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_database_dialect_equality() {
-        assert_eq!(DatabaseDialect::MySQL, DatabaseDialect::MySQL);
-        assert_ne!(DatabaseDialect::MySQL, DatabaseDialect::PostgreSQL);
-    }
-
-    #[test]
-    fn test_database_dialect_clone() {
-        let dialect = DatabaseDialect::PostgreSQL;
-        let cloned = dialect.clone();
-        assert_eq!(dialect, cloned);
-    }
-
-    #[test]
-    fn test_database_dialect_from_str_mysql() {
-        assert_eq!(
-            "mysql".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::MySQL
-        );
-        assert_eq!(
-            "MySQL".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::MySQL
-        );
-        assert_eq!(
-            "MYSQL".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::MySQL
-        );
-        assert_eq!(
-            "mariadb".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::MySQL
-        );
-        assert_eq!(
-            "MariaDB".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::MySQL
-        );
-    }
-
-    #[test]
-    fn test_database_dialect_from_str_sqlite() {
-        assert_eq!(
-            "sqlite".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::SQLite
-        );
-        assert_eq!(
-            "SQLite".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::SQLite
-        );
-        assert_eq!(
-            "sqlite3".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::SQLite
-        );
-        assert_eq!(
-            "SQLITE3".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::SQLite
-        );
-    }
-
-    #[test]
-    fn test_database_dialect_from_str_postgresql() {
-        assert_eq!(
-            "postgresql".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::PostgreSQL
-        );
-        assert_eq!(
-            "PostgreSQL".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::PostgreSQL
-        );
-        assert_eq!(
-            "postgres".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::PostgreSQL
-        );
-        assert_eq!(
-            "POSTGRES".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::PostgreSQL
-        );
-        assert_eq!(
-            "psql".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::PostgreSQL
-        );
-    }
-
-    #[test]
-    fn test_database_dialect_from_str_generic() {
-        assert_eq!(
-            "generic".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::Generic
-        );
-        assert_eq!(
-            "Generic".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::Generic
-        );
-        assert_eq!(
-            "GENERIC".parse::<DatabaseDialect>().unwrap(),
-            DatabaseDialect::Generic
-        );
-    }
-
-    #[test]
-    fn test_database_dialect_from_str_error() {
-        let result = "oracle".parse::<DatabaseDialect>();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err, ParseDialectError::UnknownDialect("oracle".to_string()));
-        assert!(err.to_string().contains("oracle"));
-        assert!(err.to_string().contains("Valid options"));
-    }
-
-    #[test]
-    fn test_database_dialect_display_mysql() {
-        assert_eq!(DatabaseDialect::MySQL.to_string(), "mysql");
-    }
-
-    #[test]
-    fn test_database_dialect_display_sqlite() {
-        assert_eq!(DatabaseDialect::SQLite.to_string(), "sqlite");
-    }
-
-    #[test]
-    fn test_database_dialect_display_postgresql() {
-        assert_eq!(DatabaseDialect::PostgreSQL.to_string(), "postgresql");
-    }
-
-    #[test]
-    fn test_database_dialect_display_generic() {
-        assert_eq!(DatabaseDialect::Generic.to_string(), "generic");
-    }
-
-    #[test]
-    fn test_database_dialect_roundtrip() {
-        // Test that Display -> FromStr roundtrip works
-        let dialects = vec![
-            DatabaseDialect::MySQL,
-            DatabaseDialect::SQLite,
-            DatabaseDialect::PostgreSQL,
-            DatabaseDialect::Generic,
-        ];
-
-        for dialect in dialects {
-            let string = dialect.to_string();
-            let parsed: DatabaseDialect = string.parse().unwrap();
-            assert_eq!(parsed, dialect);
-        }
-    }
-
-    // ============================================================================
-    // Database Tests
-    // ============================================================================
-
-    #[test]
-    fn test_database_new() {
-        let db = Database::new(DatabaseDialect::PostgreSQL);
-        assert_eq!(db.dialect, DatabaseDialect::PostgreSQL);
-        assert!(db.schemas.is_empty());
-    }
-
-    #[test]
-    fn test_database_default() {
-        let db = Database::default();
-        assert_eq!(db.dialect, DatabaseDialect::Generic);
-        assert!(db.schemas.is_empty());
-    }
-
-    #[test]
-    fn test_database_parse_simple_table() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        let result = db.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)");
-
-        assert!(result.is_ok());
-        assert_eq!(db.schemas.len(), 1);
-
-        let schema = db.schemas.get("").unwrap();
+        assert_eq!(builder.schemas.len(), 1);
+        let schema = builder.schemas.get("").unwrap();
         assert_eq!(schema.tables.len(), 1);
-        assert!(schema.tables.contains_key("users"));
+        assert!(schema
+            .tables
+            .iter()
+            .any(|t| t.rel.as_ref().unwrap().name == "users"));
     }
 
     #[test]
-    fn test_database_parse_qualified_table() {
-        let mut db = Database::new(DatabaseDialect::PostgreSQL);
-        let result = db.parse_sql("CREATE TABLE public.users (id INTEGER PRIMARY KEY)");
+    fn test_builder_parse_qualified_table() {
+        let sql = "CREATE TABLE public.users (id INTEGER PRIMARY KEY)";
 
+        let mut builder = CatalogBuilder::new("postgresql");
+        let result = builder.parse_sql(sql);
         assert!(result.is_ok());
-        assert_eq!(db.schemas.len(), 1);
 
-        let schema = db.schemas.get("public").unwrap();
+        assert_eq!(builder.schemas.len(), 1);
+        let schema = builder.schemas.get("public").unwrap();
         assert_eq!(schema.name, "public");
-        assert!(schema.tables.contains_key("users"));
+        assert!(schema
+            .tables
+            .iter()
+            .any(|t| t.rel.as_ref().unwrap().name == "users"));
     }
 
     #[test]
-    fn test_database_parse_multiple_tables() {
-        let mut db = Database::new(DatabaseDialect::Generic);
+    fn test_builder_parse_multiple_tables() {
         let sql = r#"
             CREATE TABLE users (id INTEGER PRIMARY KEY);
             CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER);
         "#;
 
-        let result = db.parse_sql(sql);
+        let mut builder = CatalogBuilder::new("generic");
+        let result = builder.parse_sql(sql);
         assert!(result.is_ok());
 
-        let schema = db.schemas.get("").unwrap();
+        let schema = builder.schemas.get("").unwrap();
         assert_eq!(schema.tables.len(), 2);
-        assert!(schema.tables.contains_key("users"));
-        assert!(schema.tables.contains_key("posts"));
+        assert!(schema
+            .tables
+            .iter()
+            .any(|t| t.rel.as_ref().unwrap().name == "users"));
+        assert!(schema
+            .tables
+            .iter()
+            .any(|t| t.rel.as_ref().unwrap().name == "posts"));
     }
 
     #[test]
-    fn test_database_parse_create_index() {
-        let mut db = Database::new(DatabaseDialect::Generic);
+    fn test_builder_parse_create_index() {
         let sql = r#"
             CREATE TABLE users (id INTEGER PRIMARY KEY, email VARCHAR(255));
             CREATE INDEX idx_email ON users (email);
         "#;
 
-        let result = db.parse_sql(sql);
+        let mut builder = CatalogBuilder::new("generic");
+        let result = builder.parse_sql(sql);
         assert!(result.is_ok());
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         assert_eq!(table.indexes.len(), 1);
         assert_eq!(table.indexes[0].name, "idx_email");
     }
 
     #[test]
-    fn test_database_parse_alter_table() {
-        let mut db = Database::new(DatabaseDialect::Generic);
+    fn test_builder_parse_alter_table() {
         let sql = r#"
             CREATE TABLE users (id INTEGER, email VARCHAR(255));
             ALTER TABLE users ADD CONSTRAINT pk_users PRIMARY KEY (id);
         "#;
 
-        let result = db.parse_sql(sql);
+        let mut builder = CatalogBuilder::new("generic");
+        let result = builder.parse_sql(sql);
         assert!(result.is_ok());
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         assert!(table.primary_key.is_some());
         assert_eq!(table.primary_key.as_ref().unwrap().columns, vec!["id"]);
     }
 
     #[test]
-    fn test_database_clone() {
-        let mut db = Database::new(DatabaseDialect::PostgreSQL);
-        db.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)")
-            .unwrap();
+    fn test_builder_clone() {
+        let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY)";
 
-        let cloned = db.clone();
-        assert_eq!(db, cloned);
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
+
+        let cloned = builder.clone();
+        assert_eq!(builder, cloned);
+    }
+
+    #[test]
+    fn test_builder_build() {
+        let sql = "CREATE TABLE public.users (id INTEGER PRIMARY KEY)";
+
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
+
+        let catalog = builder.build();
+        assert_eq!(catalog.schemas.len(), 1);
+        assert_eq!(catalog.schemas[0].name, "public");
+        assert_eq!(catalog.schemas[0].tables.len(), 1);
+    }
+
+    #[test]
+    fn test_builder_merge_catalog_disjoint_schemas() {
+        let sql = "CREATE TABLE public.users (id int)";
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
+
+        let sql = "CREATE TABLE auth.accounts (id int)";
+        let mut other_builder = CatalogBuilder::new("postgresql");
+        other_builder.parse_sql(sql).unwrap();
+
+        let other_catalog = other_builder.build();
+        builder.merge_catalog(other_catalog);
+
+        let final_catalog = builder.build();
+        assert_eq!(final_catalog.schemas.len(), 2);
+        assert!(final_catalog.schemas.iter().any(|s| s.name == "public"));
+        assert!(final_catalog.schemas.iter().any(|s| s.name == "auth"));
+    }
+
+    #[test]
+    fn test_builder_merge_catalog_into_existing_schema() {
+        let sql = "CREATE TABLE users (id int)";
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
+
+        let sql = "CREATE TABLE posts (id int)";
+        let mut other_builder = CatalogBuilder::new("postgresql");
+        other_builder.parse_sql(sql).unwrap();
+
+        let other_catalog = other_builder.build();
+        builder.merge_catalog(other_catalog);
+
+        let final_catalog = builder.build();
+        assert_eq!(final_catalog.schemas.len(), 1);
+
+        let schema = &final_catalog.schemas[0];
+        assert_eq!(schema.tables.len(), 2);
+
+        assert!(schema
+            .tables
+            .iter()
+            .any(|t| t.rel.as_ref().unwrap().name == "users"));
+        assert!(schema
+            .tables
+            .iter()
+            .any(|t| t.rel.as_ref().unwrap().name == "posts"));
+    }
+
+    #[test]
+    fn test_builder_merge_catalog_with_duplicates() {
+        let sql = "CREATE TABLE users (id int)";
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
+
+        let sql = "CREATE TABLE users (id int, name text); CREATE TABLE posts (id int)";
+        let mut other_builder = CatalogBuilder::new("postgresql");
+        other_builder.parse_sql(sql).unwrap();
+
+        let other_catalog = other_builder.build();
+        builder.merge_catalog(other_catalog);
+
+        let final_catalog = builder.build();
+        assert_eq!(final_catalog.schemas.len(), 1);
+
+        let schema = &final_catalog.schemas[0];
+        assert_eq!(schema.tables.len(), 2); // Should not add the duplicate 'users' table
+
+        let users_table = schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "users")
+            .unwrap();
+        // The original table (with 1 column) should be preserved, not the new one (with 2 columns)
+        assert_eq!(users_table.columns.len(), 1);
     }
 
     // ============================================================================
@@ -929,24 +781,21 @@ mod tests {
 
     #[test]
     fn test_schema_with_tables() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE SCHEMA myschema; CREATE TABLE myschema.users (id INTEGER)")
-            .ok();
+        let mut builder = CatalogBuilder::new("generic");
+        let sql = "CREATE TABLE myschema.users (id INTEGER PRIMARY KEY)";
+        builder.parse_sql(sql).unwrap();
 
-        // Note: CREATE SCHEMA is not parsed by sqlparser, so we test with qualified table names
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE myschema.users (id INTEGER PRIMARY KEY)")
-            .unwrap();
-
-        let schema = db.schemas.get("myschema").unwrap();
+        let schema = builder.schemas.get("myschema").unwrap();
         assert_eq!(schema.name, "myschema");
         assert_eq!(schema.tables.len(), 1);
     }
 
     #[test]
     fn test_schema_clone() {
-        let mut schema = Schema::default();
-        schema.name = "test".to_string();
+        let schema = Schema {
+            name: "test".to_string(),
+            ..Default::default()
+        };
 
         let cloned = schema.clone();
         assert_eq!(schema, cloned);
@@ -958,116 +807,70 @@ mod tests {
 
     #[test]
     fn test_table_qualified_name_with_schema() {
-        let table = Table {
-            name: "users".to_string(),
-            schema: Some("public".to_string()),
-            columns: vec![],
-            primary_key: None,
-            foreign_keys: vec![],
-            indexes: vec![],
-        };
-
+        let table = Table::new_for_test("users", Some("public"));
         assert_eq!(table.qualified_name(), "public.users");
     }
 
     #[test]
     fn test_table_qualified_name_without_schema() {
-        let table = Table {
-            name: "users".to_string(),
-            schema: None,
-            columns: vec![],
-            primary_key: None,
-            foreign_keys: vec![],
-            indexes: vec![],
-        };
-
+        let table = Table::new_for_test("users", None);
         assert_eq!(table.qualified_name(), "users");
     }
 
     #[test]
     fn test_table_qualified_name_with_empty_schema() {
-        let table = Table {
-            name: "users".to_string(),
-            schema: Some("".to_string()),
-            columns: vec![],
-            primary_key: None,
-            foreign_keys: vec![],
-            indexes: vec![],
-        };
-
+        let table = Table::new_for_test("users", Some(""));
         assert_eq!(table.qualified_name(), "users");
     }
 
     #[test]
     fn test_table_has_primary_key_true() {
-        let table = Table {
-            name: "users".to_string(),
-            schema: None,
-            columns: vec![],
-            primary_key: Some(PrimaryKey {
-                name: None,
-                columns: vec!["id".to_string()],
-            }),
-            foreign_keys: vec![],
-            indexes: vec![],
-        };
-
+        let mut table = Table::new_for_test("users", None);
+        table.primary_key = Some(PrimaryKey {
+            name: String::new(),
+            columns: vec!["id".to_string()],
+        });
         assert!(table.has_primary_key());
     }
 
     #[test]
     fn test_table_has_primary_key_false() {
-        let table = Table {
-            name: "users".to_string(),
-            schema: None,
-            columns: vec![],
-            primary_key: None,
-            foreign_keys: vec![],
-            indexes: vec![],
-        };
-
+        let table = Table::new_for_test("users", None);
         assert!(!table.has_primary_key());
     }
 
     #[test]
     fn test_table_from_create_table_simple() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(255))")
-            .unwrap();
+        let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR(255))";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
 
-        assert_eq!(table.name, "users");
-        assert_eq!(table.schema, None);
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
+        assert_eq!(table.rel.as_ref().unwrap().name, "users");
+        assert_eq!(table.rel.as_ref().unwrap().schema, "");
         assert_eq!(table.columns.len(), 2);
         assert!(table.has_primary_key());
     }
 
     #[test]
     fn test_table_from_create_table_with_schema() {
-        let mut db = Database::new(DatabaseDialect::PostgreSQL);
-        db.parse_sql("CREATE TABLE public.users (id INTEGER)")
-            .unwrap();
+        let sql = "CREATE TABLE public.users (id INTEGER)";
 
-        let schema = db.schemas.get("public").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
 
-        assert_eq!(table.name, "users");
-        assert_eq!(table.schema, Some("public".to_string()));
+        let schema = builder.schemas.get("public").unwrap();
+        let table = &schema.tables[0];
+
+        assert_eq!(table.rel.as_ref().unwrap().name, "users");
+        assert_eq!(table.rel.as_ref().unwrap().schema, "public");
     }
 
     #[test]
     fn test_table_clone() {
-        let table = Table {
-            name: "users".to_string(),
-            schema: None,
-            columns: vec![],
-            primary_key: None,
-            foreign_keys: vec![],
-            indexes: vec![],
-        };
-
+        let table = Table::new_for_test("users", None);
         let cloned = table.clone();
         assert_eq!(table, cloned);
     }
@@ -1078,82 +881,106 @@ mod tests {
 
     #[test]
     fn test_column_nullable_by_default() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (name VARCHAR(255))")
-            .unwrap();
+        let sql = "CREATE TABLE users (name VARCHAR(255))";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let column = &table.columns[0];
 
         assert_eq!(column.name, "name");
-        assert!(column.nullable);
+        assert!(!column.not_null);
     }
 
     #[test]
     fn test_column_not_null_constraint() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (name VARCHAR(255) NOT NULL)")
-            .unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        let sql = "CREATE TABLE users (name VARCHAR(255) NOT NULL)";
+        builder.parse_sql(sql).unwrap();
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let column = &table.columns[0];
 
         assert_eq!(column.name, "name");
-        assert!(!column.nullable);
+        assert!(column.not_null);
     }
 
     #[test]
     fn test_column_primary_key_not_nullable() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)")
-            .unwrap();
+        let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY)";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let column = &table.columns[0];
 
         assert_eq!(column.name, "id");
-        assert!(!column.nullable);
+        assert!(column.not_null);
     }
 
     #[test]
     fn test_column_default_value() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (status VARCHAR(50) DEFAULT 'active')")
-            .unwrap();
+        let sql = "CREATE TABLE users (status VARCHAR(50) DEFAULT 'active')";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let column = &table.columns[0];
 
         assert_eq!(column.name, "status");
-        assert!(column.default.is_some());
-        assert!(column.default.as_ref().unwrap().contains("active"));
+        // Note: default values are not stored in plugin::Column
     }
 
     #[test]
     fn test_column_data_type() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (id INTEGER, name VARCHAR(255), created_at TIMESTAMP)")
-            .unwrap();
+        let sql = "CREATE TABLE users (id INTEGER, name VARCHAR(255), created_at TIMESTAMP)";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
 
-        assert_eq!(table.columns[0].data_type, "INTEGER");
-        assert!(table.columns[1].data_type.contains("VARCHAR"));
-        assert_eq!(table.columns[2].data_type, "TIMESTAMP");
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
+
+        assert_eq!(table.columns[0].r#type.as_ref().unwrap().name, "INTEGER");
+        assert!(table.columns[1]
+            .r#type
+            .as_ref()
+            .unwrap()
+            .name
+            .contains("VARCHAR"));
+        assert_eq!(table.columns[2].r#type.as_ref().unwrap().name, "TIMESTAMP");
     }
 
     #[test]
     fn test_column_clone() {
         let column = Column {
             name: "test".to_string(),
-            data_type: "INTEGER".to_string(),
-            nullable: true,
-            default: Some("0".to_string()),
+            not_null: false,
+            is_array: false,
+            comment: String::new(),
+            length: 0,
+            is_named_param: false,
+            is_func_call: false,
+            scope: String::new(),
+            table: None,
+            table_alias: String::new(),
+            r#type: Some(Identifier {
+                catalog: String::new(),
+                schema: String::new(),
+                name: "INTEGER".to_string(),
+            }),
+            is_sqlc_slice: false,
+            embed_table: None,
+            original_name: "test".to_string(),
+            unsigned: false,
+            array_dims: 0,
         };
 
         let cloned = column.clone();
@@ -1166,17 +993,16 @@ mod tests {
 
     #[test]
     fn test_index_from_create_index() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE users (email VARCHAR(255));
             CREATE INDEX idx_email ON users (email);
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
 
         assert_eq!(table.indexes.len(), 1);
         assert_eq!(table.indexes[0].name, "idx_email");
@@ -1186,17 +1012,16 @@ mod tests {
 
     #[test]
     fn test_index_unique() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE users (email VARCHAR(255));
             CREATE UNIQUE INDEX idx_email ON users (email);
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
 
         assert_eq!(table.indexes.len(), 1);
         assert!(table.indexes[0].unique);
@@ -1204,17 +1029,16 @@ mod tests {
 
     #[test]
     fn test_index_multi_column() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE users (first_name VARCHAR(255), last_name VARCHAR(255));
             CREATE INDEX idx_name ON users (first_name, last_name);
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
 
         assert_eq!(table.indexes.len(), 1);
         assert_eq!(table.indexes[0].columns.len(), 2);
@@ -1296,12 +1120,13 @@ mod tests {
 
     #[test]
     fn test_primary_key_single_column() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)")
-            .unwrap();
+        let sql = "CREATE TABLE users (id INTEGER PRIMARY KEY)";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let pk = table.primary_key.as_ref().unwrap();
 
         assert_eq!(pk.columns.len(), 1);
@@ -1310,11 +1135,14 @@ mod tests {
 
     #[test]
     fn test_primary_key_composite() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE user_roles (user_id INTEGER, role_id INTEGER, PRIMARY KEY (user_id, role_id))").unwrap();
+        let sql =
+            "CREATE TABLE user_roles (user_id INTEGER, role_id INTEGER, PRIMARY KEY (user_id, role_id))";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("user_roles").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let pk = table.primary_key.as_ref().unwrap();
 
         assert_eq!(pk.columns.len(), 2);
@@ -1323,22 +1151,23 @@ mod tests {
 
     #[test]
     fn test_primary_key_named_constraint() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE users (id INTEGER, CONSTRAINT pk_users PRIMARY KEY (id))")
-            .unwrap();
+        let sql = "CREATE TABLE users (id INTEGER, CONSTRAINT pk_users PRIMARY KEY (id))";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("users").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let pk = table.primary_key.as_ref().unwrap();
 
-        assert!(pk.name.is_some());
-        assert_eq!(pk.name.as_ref().unwrap(), "pk_users");
+        assert_eq!(pk.name, "pk_users");
+        assert_eq!(pk.columns, vec!["id"]);
     }
 
     #[test]
     fn test_primary_key_contains() {
         let pk = PrimaryKey {
-            name: None,
+            name: String::new(),
             columns: vec!["id".to_string(), "tenant_id".to_string()],
         };
 
@@ -1350,7 +1179,7 @@ mod tests {
     #[test]
     fn test_primary_key_clone() {
         let pk = PrimaryKey {
-            name: Some("pk_users".to_string()),
+            name: "pk_users".to_string(),
             columns: vec!["id".to_string()],
         };
 
@@ -1364,15 +1193,16 @@ mod tests {
 
     #[test]
     fn test_foreign_key_inline_constraint() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql("CREATE TABLE posts (id INTEGER, user_id INTEGER REFERENCES users(id))")
-            .unwrap();
+        let sql = "CREATE TABLE posts (id INTEGER, user_id INTEGER REFERENCES users(id))";
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("posts").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
 
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         assert_eq!(table.foreign_keys.len(), 1);
         let fk = &table.foreign_keys[0];
+
         assert_eq!(fk.columns, vec!["user_id"]);
         assert_eq!(fk.referenced_table, "users");
         assert_eq!(fk.referenced_columns, vec!["id"]);
@@ -1380,20 +1210,23 @@ mod tests {
 
     #[test]
     fn test_foreign_key_table_constraint() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE posts (
                 id INTEGER,
                 user_id INTEGER,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("posts").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "posts")
+            .unwrap();
 
         assert_eq!(table.foreign_keys.len(), 1);
         let fk = &table.foreign_keys[0];
@@ -1403,82 +1236,90 @@ mod tests {
 
     #[test]
     fn test_foreign_key_named_constraint() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE posts (
                 id INTEGER,
                 user_id INTEGER,
                 CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)
             )
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("posts").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "posts")
+            .unwrap();
         let fk = &table.foreign_keys[0];
 
-        assert!(fk.name.is_some());
-        assert_eq!(fk.name.as_ref().unwrap(), "fk_user");
+        assert!(!fk.name.is_empty());
+        assert_eq!(fk.name, "fk_user");
     }
 
     #[test]
     fn test_foreign_key_on_delete() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE posts (
                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
             )
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("posts").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "posts")
+            .unwrap();
         let fk = &table.foreign_keys[0];
 
-        assert!(fk.on_delete.is_some());
-        assert!(fk.on_delete.as_ref().unwrap().contains("CASCADE"));
+        assert!(!fk.on_delete.is_empty());
+        assert!(fk.on_delete.contains("CASCADE"));
     }
 
     #[test]
     fn test_foreign_key_on_update() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE posts (
                 user_id INTEGER REFERENCES users(id) ON UPDATE CASCADE
             )
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("posts").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "posts")
+            .unwrap();
         let fk = &table.foreign_keys[0];
 
-        assert!(fk.on_update.is_some());
-        assert!(fk.on_update.as_ref().unwrap().contains("CASCADE"));
+        assert!(!fk.on_update.is_empty());
+        assert!(fk.on_update.contains("CASCADE"));
     }
 
     #[test]
     fn test_foreign_key_composite() {
-        let mut db = Database::new(DatabaseDialect::Generic);
-        db.parse_sql(
-            r#"
+        let sql = r#"
             CREATE TABLE order_items (
                 order_id INTEGER,
                 product_id INTEGER,
                 FOREIGN KEY (order_id, product_id) REFERENCES orders(id, product_id)
             )
-        "#,
-        )
-        .unwrap();
+        "#;
 
-        let schema = db.schemas.get("").unwrap();
-        let table = schema.tables.get("order_items").unwrap();
+        let mut builder = CatalogBuilder::new("generic");
+        builder.parse_sql(sql).unwrap();
+
+        let schema = builder.schemas.get("").unwrap();
+        let table = &schema.tables[0];
         let fk = &table.foreign_keys[0];
 
         assert_eq!(fk.columns.len(), 2);
@@ -1489,12 +1330,12 @@ mod tests {
     #[test]
     fn test_foreign_key_references() {
         let fk = ForeignKey {
-            name: None,
+            name: String::new(),
             columns: vec!["user_id".to_string()],
             referenced_table: "users".to_string(),
             referenced_columns: vec!["id".to_string()],
-            on_delete: None,
-            on_update: None,
+            on_delete: String::new(),
+            on_update: String::new(),
         };
 
         assert!(fk.references("users"));
@@ -1504,12 +1345,12 @@ mod tests {
     #[test]
     fn test_foreign_key_contains() {
         let fk = ForeignKey {
-            name: None,
+            name: String::new(),
             columns: vec!["user_id".to_string(), "tenant_id".to_string()],
             referenced_table: "users".to_string(),
             referenced_columns: vec!["id".to_string(), "tenant_id".to_string()],
-            on_delete: None,
-            on_update: None,
+            on_delete: String::new(),
+            on_update: String::new(),
         };
 
         assert!(fk.contains("user_id"));
@@ -1520,12 +1361,12 @@ mod tests {
     #[test]
     fn test_foreign_key_clone() {
         let fk = ForeignKey {
-            name: Some("fk_user".to_string()),
+            name: "fk_user".to_string(),
             columns: vec!["user_id".to_string()],
             referenced_table: "users".to_string(),
             referenced_columns: vec!["id".to_string()],
-            on_delete: Some("CASCADE".to_string()),
-            on_update: None,
+            on_delete: "CASCADE".to_string(),
+            on_update: String::new(),
         };
 
         let cloned = fk.clone();
@@ -1538,7 +1379,6 @@ mod tests {
 
     #[test]
     fn test_complete_schema_parsing() {
-        let mut db = Database::new(DatabaseDialect::PostgreSQL);
         let sql = r#"
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY,
@@ -1558,33 +1398,42 @@ mod tests {
             CREATE UNIQUE INDEX idx_users_email ON users (email);
         "#;
 
-        db.parse_sql(sql).unwrap();
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
 
-        let schema = db.schemas.get("").unwrap();
+        let schema = builder.schemas.get("").unwrap();
         assert_eq!(schema.tables.len(), 2);
 
-        let users_table = schema.tables.get("users").unwrap();
+        let users_table = &schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "users")
+            .unwrap();
         assert_eq!(users_table.columns.len(), 3);
         assert!(users_table.has_primary_key());
         assert_eq!(users_table.indexes.len(), 1);
 
-        let posts_table = schema.tables.get("posts").unwrap();
+        let posts_table = &schema
+            .tables
+            .iter()
+            .find(|t| t.rel.as_ref().unwrap().name == "posts")
+            .unwrap();
         assert_eq!(posts_table.foreign_keys.len(), 1);
         assert_eq!(posts_table.indexes.len(), 1);
     }
 
     #[test]
     fn test_multiple_schemas() {
-        let mut db = Database::new(DatabaseDialect::PostgreSQL);
         let sql = r#"
             CREATE TABLE public.users (id INTEGER PRIMARY KEY);
             CREATE TABLE auth.sessions (id INTEGER PRIMARY KEY);
         "#;
 
-        db.parse_sql(sql).unwrap();
+        let mut builder = CatalogBuilder::new("postgresql");
+        builder.parse_sql(sql).unwrap();
 
-        assert_eq!(db.schemas.len(), 2);
-        assert!(db.schemas.contains_key("public"));
-        assert!(db.schemas.contains_key("auth"));
+        assert_eq!(builder.schemas.len(), 2);
+        assert!(builder.schemas.contains_key("public"));
+        assert!(builder.schemas.contains_key("auth"));
     }
 }

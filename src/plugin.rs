@@ -89,6 +89,37 @@ pub struct Enum {
     #[prost(string, tag = "3")]
     pub comment: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PrimaryKey {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ForeignKey {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "3")]
+    pub referenced_table: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub referenced_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "5")]
+    pub on_delete: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub on_update: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Index {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "3")]
+    pub unique: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Table {
     #[prost(message, optional, tag = "1")]
@@ -97,6 +128,12 @@ pub struct Table {
     pub columns: ::prost::alloc::vec::Vec<Column>,
     #[prost(string, tag = "3")]
     pub comment: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub primary_key: ::core::option::Option<PrimaryKey>,
+    #[prost(message, repeated, tag = "5")]
+    pub foreign_keys: ::prost::alloc::vec::Vec<ForeignKey>,
+    #[prost(message, repeated, tag = "6")]
+    pub indexes: ::prost::alloc::vec::Vec<Index>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Identifier {

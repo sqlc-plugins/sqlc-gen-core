@@ -33,6 +33,7 @@
 //! ```
 
 use crate::plugin::{GenerateRequest, GenerateResponse};
+use crate::schema::CatalogBuilder;
 use prost::Message;
 use std::error::Error;
 use std::io::{Read, Write};
@@ -156,9 +157,26 @@ where
     let mut input = Vec::new();
     reader.read_to_end(&mut input)?;
 
-    let request = GenerateRequest::decode(&input[..])?;
-    let response = process(request)?;
+    let mut request = GenerateRequest::decode(&input[..])?;
 
+    if let Some(settings) = &request.settings {
+        if !settings.schema.is_empty() {
+            let mut builder = CatalogBuilder::new(settings.engine.as_str());
+
+            for item in &settings.schema {
+                let schema = std::fs::read_to_string(item)?;
+                builder.parse_sql(&schema)?;
+            }
+
+            if let Some(catalog) = request.catalog.take() {
+                builder.merge_catalog(catalog);
+            }
+
+            request.catalog = Some(builder.build());
+        }
+    }
+
+    let response = process(request)?;
     let mut output = Vec::new();
     response.encode(&mut output)?;
 

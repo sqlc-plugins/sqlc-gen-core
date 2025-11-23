@@ -69,10 +69,33 @@ message Enum {
   string comment = 3;
 }
 
+message PrimaryKey {
+  string name = 1 [json_name = "name"];
+  repeated string columns = 2 [json_name = "columns"];
+}
+
+message ForeignKey {
+  string name = 1 [json_name = "name"];
+  repeated string columns = 2 [json_name = "columns"];
+  string referenced_table = 3 [json_name = "referenced_table"];
+  repeated string referenced_columns = 4 [json_name = "referenced_columns"];
+  string on_delete = 5 [json_name = "on_delete"];
+  string on_update = 6 [json_name = "on_update"];
+}
+
+message Index {
+  string name = 1 [json_name = "name"];
+  repeated string columns = 2 [json_name = "columns"];
+  bool unique = 3 [json_name = "unique"];
+}
+
 message Table {
   Identifier rel = 1;
   repeated Column columns = 2;
   string comment = 3;
+  PrimaryKey primary_key = 4 [json_name = "primary_key"];
+  repeated ForeignKey foreign_keys = 5 [json_name = "foreign_keys"];
+  repeated Index indexes = 6 [json_name = "indexes"];
 }
 
 message Identifier {
